@@ -232,12 +232,17 @@ harbor_create_robot() {
 
     print_info "Creating robot account '$robot_name' with all-projects access..."
 
-    # Build payload
+    # Build payload (Harbor uses -1 for never expires, not 0)
+    local robot_duration=$expires
+    if [ "$expires" = "0" ]; then
+        robot_duration=-1
+    fi
+
     local payload=$(cat << EOF
 {
   "name": "$robot_name",
   "description": "$robot_desc",
-  "duration": $expires,
+  "duration": $robot_duration,
   "level": "system",
   "permissions": [
     {
@@ -528,12 +533,17 @@ harbor_create_robot_with_projects() {
         permissions+=']'
     fi
 
-    # Build payload
+    # Build payload (Harbor uses -1 for never expires, not 0)
+    local robot_duration=$expires
+    if [ "$expires" = "0" ]; then
+        robot_duration=-1
+    fi
+
     local payload=$(cat << EOF
 {
   "name": "$robot_name",
   "description": "$robot_desc",
-  "duration": $expires,
+  "duration": $robot_duration,
   "level": "system",
   "permissions": $permissions
 }
