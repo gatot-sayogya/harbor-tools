@@ -78,6 +78,19 @@ print_info() {
     echo -e "${CYAN}ℹ️  $1${NC}"
 }
 
+# Helper function for colored prompts (avoids nested parentheses)
+prompt() {
+    local text="$1"
+    local var_name="$2"
+    local default_value="$3"
+
+    echo -ne "${GREEN}${text}${NC}"
+    read "$var_name"
+    if [ -n "$default_value" ]; then
+        eval "${var_name}=\${${var_name}:-\$default_value}"
+    fi
+}
+
 show_help() {
     cat << EOF
 ${MAGENTA}Harbor Robot Account Manager${NC} - v${VERSION}
@@ -807,7 +820,8 @@ interactive_apply_k8s() {
         read -p "$(echo -e ${GREEN}Enter Harbor URL [default: ${DEFAULT_HARBOR_URL}]: ${NC})" harbor_url
         harbor_url=${harbor_url:-$DEFAULT_HARBOR_URL}
 
-        read -p "$(echo -e ${GREEN}Enter robot username (e.g., robot\$jenkins-robot): ${NC})" robot_user
+        echo -ne "${GREEN}Enter robot username (e.g., robot\$jenkins-robot): ${NC}"
+        read robot_user
 
         read -s -p "$(echo -e ${GREEN}Enter robot token: ${NC})" robot_token
         echo ""
@@ -833,7 +847,8 @@ interactive_apply_k8s() {
             namespaces="all"
             ;;
         2)
-            read -p "$(echo -e ${GREEN}Enter namespaces (comma-separated): ${NC})" namespaces
+            echo -ne "${GREEN}Enter namespaces (comma-separated): ${NC}"
+            read namespaces
             ;;
         3)
             read -p "$(echo -e ${GREEN}Enter regex pattern: ${NC})" regex
