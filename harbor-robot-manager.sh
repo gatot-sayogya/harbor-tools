@@ -1,0 +1,1198 @@
+#!/bin/bash
+# Harbor Robot Account Manager - All-in-One Script
+# Version: 1.1.0
+#
+# This script combines Harbor robot account creation and Kubernetes secret management
+# into a single unified tool with both interactive and automated modes.
+#
+# Features:
+#   - Create Harbor robot accounts with specific or all-projects access
+#   - Interactive multi-select for Harbor projects
+#   - Apply Harbor credentials to Kubernetes namespaces
+#   - Interactive and automated modes
+#   - List existing robot accounts
+#   - List Harbor projects
+#   - Update existing credentials
+#
+# Usage:
+#   Interactive mode:  ./harbor-robot-manager.sh
+#   Automated mode:    ./harbor-robot-manager.sh --auto --robot-user "robot$jenkins" --token "xxx"
+#   Help:             ./harbor-robot-manager.sh --help
+
+set -e
+
+# ======================
+# CONFIGURATION
+# ======================
+
+# Default Harbor configuration
+DEFAULT_HARBOR_URL="http://192.168.72.8:30012"
+DEFAULT_HARBOR_ADMIN="admin"
+DEFAULT_HARBOR_EMAIL="jenkins@goapotik.com"
+DEFAULT_SECRET_NAME="harbor-registry-secret"
+
+# Script version
+VERSION="1.1.0"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m' # No Color
+
+# ======================
+# UTILITY FUNCTIONS
+# ======================
+
+banner() {
+    echo -e "${MAGENTA}╔══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${MAGENTA}║        Harbor Robot Account Manager - v${VERSION}                   ║${NC}"
+    echo -e "${MAGENTA}║    Create & Manage Harbor Robot Accounts in Kubernetes             ║${NC}"
+    echo -e "${MAGENTA}╚══════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+print_header() {
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}  $1${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
+print_success() {
+    echo -e "${GREEN}✅ $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}❌ $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+print_info() {
+    echo -e "${CYAN}ℹ️  $1${NC}"
+}
+
+show_help() {
+    cat << EOF
+${MAGENTA}Harbor Robot Account Manager${NC} - v${VERSION}
+
+${CYAN}USAGE:${NC}
+  Interactive mode:  $0 [options]
+  Automated mode:    $0 --auto --robot-user "<user>" --token "<token>" --namespaces "<ns1,ns2>"
+
+${CYAN}OPTIONS:${NC}
+  General:
+    -h, --help              Show this help message
+    -v, --version           Show version information
+    --auto                  Run in automated (non-interactive) mode
+    --dry-run               Show what would be done without making changes
+
+  Harbor Operations:
+    --create-robot          Create a new Harbor robot account
+    --list-robots           List all existing robot accounts in Harbor
+    --list-projects         List all Harbor projects (for selection)
+    --harbor-url <url>      Harbor registry URL (default: ${DEFAULT_HARBOR_URL})
+    --admin-user <user>     Harbor admin username (default: ${DEFAULT_HARBOR_ADMIN})
+    --admin-pass <pass>     Harbor admin password (required for robot creation)
+    --robot-name <name>     Robot account name (required in interactive mode)
+    --robot-desc <desc>     Robot account description
+    --expires <days>        Robot account expiration in days (default: 365, 0 = never)
+    --projects <list>       Comma-separated Harbor projects (default: all projects)
+
+  Kubernetes Operations:
+    --apply-k8s             Apply Harbor credentials to Kubernetes
+    --robot-user <user>     Harbor robot username (e.g., robot\$jenkins-robot)
+    --token <token>         Harbor robot token/secret
+    --namespaces <list>     Comma-separated list of namespaces (default: all)
+    --all-namespaces        Apply to all namespaces
+    --service-accounts <list> Comma-separated service accounts (default: default,jenkins)
+    --secret-name <name>    Kubernetes secret name (default: ${DEFAULT_SECRET_NAME})
+
+${CYAN}ENVIRONMENT VARIABLES:${NC}
+  HARBOR_URL              Harbor registry URL
+  HARBOR_ADMIN_USER       Harbor admin username
+  HARBOR_ADMIN_PASSWORD   Harbor admin password
+  HARBOR_ROBOT_USERNAME   Harbor robot username
+  HARBOR_ROBOT_TOKEN      Harbor robot token
+  HARBOR_PROJECTS        Comma-separated Harbor project list
+  K8S_NAMESPACES          Comma-separated namespace list
+
+${CYAN}EXAMPLES:${NC}
+  # Interactive mode - create robot and apply to all namespaces
+  $0
+
+  # Automated - create robot with specific project access
+  $0 --auto --create-robot \\
+     --admin-pass "harbor-admin-pass" \\
+     --robot-name "jenkins-dev" \\
+     --projects "goapotik,myproject"
+
+  # Automated - apply existing robot to specific namespaces
+  $0 --auto --apply-k8s \\
+     --robot-user "robot\$jenkins-robot" \\
+     --token "your-token-here" \\
+     --namespaces "jenkins,goapotik,default"
+
+  # Create new robot account with all projects access
+  $0 --auto --create-robot --admin-pass "harbor-admin-pass" \\
+     --robot-name "jenkins-prod" --expires 90
+
+  # List all robot accounts
+  $0 --auto --list-robots --admin-pass "your-admin-password"
+
+${CYAN}WORKFLOW EXAMPLE:${NC}
+  1. Create robot account in Harbor (with project selection)
+     $0 --auto --create-robot \\
+        --admin-pass "harbor-admin-pass" \\
+        --robot-name "jenkins-global" \\
+        --projects "project1,project2"
+
+  2. Apply to Kubernetes namespaces
+     $0 --auto --apply-k8s \\
+        --robot-user "robot\$jenkins-global" \\
+        --token "<token-from-step-1>" \\
+        --namespaces "all"
+
+EOF
+    exit 0
+}
+
+show_version() {
+    echo "Harbor Robot Account Manager v${VERSION}"
+    exit 0
+}
+
+# ======================
+# HARBOR API FUNCTIONS
+# ======================
+
+harbor_login() {
+    local url="$1"
+    local username="$2"
+    local password="$3"
+
+    # Add http:// prefix if missing
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        url="http://$url"
+    fi
+
+    print_info "Verifying Harbor credentials at $url..." >&2
+
+    # Verify credentials by testing API access
+    local response=$(curl -s -k -w '\n%{http_code}' -X GET "${url}/api/v2.0/projects" \
+        -u "${username}:${password}" \
+        -G --data-urlencode "page=1" \
+        --data-urlencode "page_size=1")
+
+    local http_code=$(printf '%s' "$response" | tail -n1)
+
+    if [ "$http_code" != "200" ]; then
+        print_error "Failed to authenticate to Harbor!"
+        local body=$(printf '%s' "$response" | sed '$d')
+        echo "Error detail: HTTP $http_code" >&2
+        echo "Response (first 200 chars): $(echo "$body" | head -c 200)" >&2
+        return 1
+    fi
+
+    print_success "Authentication successful" >&2
+    # Return Basic Auth credentials for API calls
+    echo "${username}:${password}"
+}
+
+harbor_create_robot() {
+    local url="$1"
+    local token="$2"
+    local robot_name="$3"
+    local robot_desc="$4"
+    local expires="$5"
+
+    # Add http:// prefix if missing
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        url="http://$url"
+    fi
+
+    print_info "Creating robot account '$robot_name' with all-projects access..."
+
+    # Build payload
+    local payload=$(cat << EOF
+{
+  "name": "$robot_name",
+  "description": "$robot_desc",
+  "duration": $expires,
+  "level": "system",
+  "permissions": [
+    {
+      "kind": "project",
+      "namespace": "/*",
+      "access": [
+        {
+          "action": "push",
+          "resource": "repository"
+        },
+        {
+          "action": "pull",
+          "resource": "repository"
+        }
+      ]
+    }
+  ]
+}
+EOF
+)
+
+    # Create robot
+    local response=$(curl -s -k -w '\n%{http_code}' -X POST "${url}/api/v2.0/robots" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -d "$payload")
+
+    # Extract HTTP status code and body (handle empty response)
+    local http_code=$(printf '%s' "$response" | tail -n1)
+    local body=$(printf '%s' "$response" | sed '$d')
+
+    # Check HTTP status
+    if [ "$http_code" != "201" ] && [ "$http_code" != "200" ]; then
+        echo "{\"error\": true, \"message\": \"HTTP $http_code - Failed to create robot\", \"response\": \"$body\"}" | jq '.'
+        return 1
+    fi
+
+    echo "$body"
+}
+
+harbor_list_robots() {
+    local url="$1"
+    local credentials="$2"
+
+    # Add http:// prefix if missing
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        url="http://$url"
+    fi
+
+    local response=$(curl -s -k -w '\n%{http_code}' -X GET "${url}/api/v2.0/robots" \
+        -u "${credentials}")
+
+    # Extract HTTP status code and body (handle empty response)
+    local http_code=$(printf '%s' "$response" | tail -n1)
+    local body=$(printf '%s' "$response" | sed '$d')
+
+    # Check HTTP status
+    if [ "$http_code" != "200" ]; then
+        echo "{\"error\": true, \"message\": \"HTTP $http_code - Failed to fetch robots\", \"response\": \"$body\"}" | jq '.'
+        return 1
+    fi
+
+    echo "$body"
+}
+
+harbor_list_projects() {
+    local url="$1"
+    local credentials="$2"
+
+    # Add http:// prefix if missing
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        url="http://$url"
+    fi
+
+    local response=$(curl -s -k -w '\n%{http_code}' -X GET "${url}/api/v2.0/projects" \
+        -u "${credentials}" \
+        -G --data-urlencode "page=1" \
+        --data-urlencode "page_size=100")
+
+    # Extract HTTP status code and body (handle empty response)
+    local http_code=$(printf '%s' "$response" | tail -n1)
+    local body=$(printf '%s' "$response" | sed '$d')
+
+    # Check HTTP status
+    if [ "$http_code" != "200" ]; then
+        echo "{\"error\": true, \"message\": \"HTTP $http_code - Failed to fetch projects\", \"response\": \"$body\"}" | jq '.'
+        return 1
+    fi
+
+    # Validate JSON response
+    if ! echo "$body" | jq '.' >/dev/null 2>&1; then
+        echo "{\"error\": true, \"message\": \"Invalid JSON response from Harbor\", \"response\": \"$body\"}" | jq '.'
+        return 1
+    fi
+
+    echo "$body"
+}
+
+# Multi-select menu for projects
+harbor_select_projects() {
+    local harbor_url="$1"
+    local credentials="$2"
+
+    print_header "Select Harbor Projects"
+
+    # Get all projects
+    local projects_json=$(harbor_list_projects "$harbor_url" "$credentials")
+
+    # Check for error in response - verify it's a valid array
+    if ! echo "$projects_json" | jq -e '.[]' >/dev/null 2>&1; then
+        print_error "Failed to fetch projects" >&2
+        echo "Response: $projects_json" | head -c 200 >&2
+        return 1
+    fi
+
+    local project_count=$(echo "$projects_json" | jq '. | length' 2>/dev/null)
+
+    if [ -z "$project_count" ] || [ "$project_count" = "null" ] || ! [[ "$project_count" =~ ^[0-9]+$ ]]; then
+        print_error "Failed to parse project list" >&2
+        echo "Response received:" >&2
+        echo "$projects_json" | head -c 500 >&2
+        return 1
+    fi
+
+    if [ "$project_count" -eq 0 ]; then
+        print_warning "No projects found in Harbor!" >&2
+        return 1
+    fi
+
+    print_info "Found $project_count project(s) in Harbor" >&2
+    echo "" >&2
+
+    # Display projects with numbers
+    local project_list=()
+    local index=1
+
+    echo -e "${GREEN}Available Projects:${NC}" >&2
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}" >&2
+
+    while IFS= read -r project; do
+        local name=$(echo "$project" | jq -r '.name')
+        local public=$(echo "$project" | jq -r '.public')
+        local public_label="${GREEN}Public${NC}"
+        [ "$public" = "false" ] && public_label="${RED}Private${NC}"
+
+        echo -e "  ${CYAN}[$index]${NC} $name (${public_label})" >&2
+        project_list+=("$name")
+        ((index++))
+    done < <(echo "$projects_json" | jq -c '.[]')
+
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}" >&2
+    echo "" >&2
+
+    # Multi-select instructions
+    echo -e "${CYAN}Selection Options:${NC}" >&2
+    echo "  • Enter project numbers separated by commas (e.g., 1,3,5)" >&2
+    echo "  • Enter range (e.g., 1-5)" >&2
+    echo "  • Enter 'all' to select all projects" >&2
+    echo "  • Enter 'none' to skip (will use all projects by default)" >&2
+    echo "" >&2
+    echo -ne "${GREEN}Select projects [all]: ${NC}" >&2
+    read selection
+
+    # Process selection
+    local selected_projects=()
+
+    if [ -z "$selection" ] || [ "$selection" = "all" ]; then
+        selected_projects=("${project_list[@]}")
+        print_success "Selected all projects (${#selected_projects[@]})" >&2
+    elif [ "$selection" = "none" ]; then
+        selected_projects=()
+        print_info "No specific projects selected (will use default /*)" >&2
+    else
+        # Parse comma-separated numbers and ranges
+        IFS=',' read -ra selections <<< "$selection"
+        for sel in "${selections[@]}"; do
+            if [[ "$sel" =~ ^[0-9]+-[0-9]+$ ]]; then
+                # Range (e.g., 1-5)
+                start=$(echo "$sel" | cut -d'-' -f1)
+                end=$(echo "$sel" | cut -d'-' -f2)
+                for ((i=start; i<=end; i++)); do
+                    if [ $i -ge 1 ] && [ $i -le ${#project_list[@]} ]; then
+                        selected_projects+=("${project_list[$((i-1))]}")
+                    fi
+                done
+            elif [[ "$sel" =~ ^[0-9]+$ ]]; then
+                # Single number
+                if [ $sel -ge 1 ] && [ $sel -le ${#project_list[@]} ]; then
+                    selected_projects+=("${project_list[$((sel-1))]}")
+                else
+                    print_warning "Invalid selection: $sel (skipped)" >&2
+                fi
+            fi
+        done
+    fi
+
+    echo "" >&2
+    if [ ${#selected_projects[@]} -gt 0 ]; then
+        print_success "Selected ${#selected_projects[@]} project(s):" >&2
+        for proj in "${selected_projects[@]}"; do
+            echo "  • $proj" >&2
+        done
+    else
+        print_warning "No projects selected - robot will have access to ALL projects" >&2
+    fi
+    echo "" >&2
+
+    # Return selected projects as comma-separated string (ONLY this goes to stdout)
+    local result=$(
+        IFS=','
+        echo "${selected_projects[*]}"
+    )
+    echo "$result"
+}
+
+# Enhanced robot creation with project selection
+harbor_create_robot_with_projects() {
+    local url="$1"
+    local credentials="$2"
+    local robot_name="$3"
+    local robot_desc="$4"
+    local expires="$5"
+    local selected_projects="$6"
+
+    # Add http:// prefix if missing
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        url="http://$url"
+    fi
+
+    print_info "Creating robot account '$robot_name'..." >&2
+
+    # Build permissions array
+    local permissions=""
+    if [ -z "$selected_projects" ] || [ "$selected_projects" = "all" ]; then
+        # All projects access - fetch all projects first
+        print_info "Fetching all Harbor projects for permissions..." >&2
+        local all_projects_json=$(harbor_list_projects "$url" "$credentials")
+
+        # Check for error - verify it's a valid array
+        if ! echo "$all_projects_json" | jq -e '.[]' >/dev/null 2>&1; then
+            print_error "Failed to fetch projects or invalid response"
+            echo "Response: $all_projects_json" | head -c 200 >&2
+            return 1
+        fi
+
+        # Build permissions for each project
+        permissions='['
+        local first=true
+        while IFS= read -r project; do
+            local proj_name=$(echo "$project" | jq -r '.name')
+            if [ "$first" = true ]; then
+                first=false
+            else
+                permissions+=','
+            fi
+            permissions+="{
+              \"kind\": \"project\",
+              \"namespace\": \"$proj_name\",
+              \"access\": [
+                {\"action\": \"push\", \"resource\": \"repository\"},
+                {\"action\": \"pull\", \"resource\": \"repository\"}
+              ]
+            }"
+        done < <(echo "$all_projects_json" | jq -c '.[]')
+        permissions+=']'
+        print_success "Created permissions for all projects" >&2
+    else
+        # Specific projects
+        permissions='['
+        local first=true
+        IFS=',' read -ra projects <<< "$selected_projects"
+        for proj in "${projects[@]}"; do
+            proj=$(echo "$proj" | xargs)
+            if [ "$first" = true ]; then
+                first=false
+            else
+                permissions+=','
+            fi
+            permissions+="{
+              \"kind\": \"project\",
+              \"namespace\": \"$proj\",
+              \"access\": [
+                {\"action\": \"push\", \"resource\": \"repository\"},
+                {\"action\": \"pull\", \"resource\": \"repository\"}
+              ]
+            }"
+        done
+        permissions+=']'
+    fi
+
+    # Build payload
+    local payload=$(cat << EOF
+{
+  "name": "$robot_name",
+  "description": "$robot_desc",
+  "duration": $expires,
+  "level": "system",
+  "permissions": $permissions
+}
+EOF
+)
+
+    # Create robot using Basic Auth
+    local response=$(curl -s -k -w '\n%{http_code}' -X POST "${url}/api/v2.0/robots" \
+        -u "${credentials}" \
+        -H "Content-Type: application/json" \
+        -d "$payload")
+
+    # Extract HTTP status code and body (handle empty response)
+    local http_code=$(printf '%s' "$response" | tail -n1)
+    local body=$(printf '%s' "$response" | sed '$d')
+
+    # Check HTTP status
+    if [ "$http_code" != "201" ] && [ "$http_code" != "200" ]; then
+        echo "{\"error\": true, \"message\": \"HTTP $http_code - Failed to create robot\", \"response\": \"$body\"}" | jq '.'
+        return 1
+    fi
+
+    echo "$body"
+}
+
+# ======================
+# KUBERNETES FUNCTIONS
+# ======================
+
+k8s_create_secret() {
+    local namespace="$1"
+    local secret_name="$2"
+    local harbor_url="$3"
+    local username="$4"
+    local password="$5"
+    local email="$6"
+
+    kubectl create secret docker-registry "$secret_name" \
+        --docker-server="$harbor_url" \
+        --docker-username="$username" \
+        --docker-password="$password" \
+        --docker-email="$email" \
+        -n "$namespace" --dry-run=client -o yaml | kubectl apply -n "$namespace" -f - &>/dev/null
+}
+
+k8s_patch_service_account() {
+    local namespace="$1"
+    local service_account="$2"
+    local secret_name="$3"
+
+    kubectl patch serviceaccount "$service_account" \
+        -n "$namespace" \
+        -p "{\"imagePullSecrets\": [{\"name\": \"$secret_name\"}]}" &>/dev/null
+}
+
+k8s_apply_credentials() {
+    local harbor_url="$1"
+    local username="$2"
+    local token="$3"
+    local namespaces="$4"
+    local service_accounts="$5"
+    local secret_name="$6"
+    local email="$7"
+    local dry_run="$8"
+
+    print_header "Applying Harbor Credentials to Kubernetes"
+
+    print_info "Harbor URL: $harbor_url"
+    print_info "Robot User: $username"
+    print_info "Secret Name: $secret_name"
+    print_info "Namespaces: ${namespaces:-"All"}"
+    print_info "Service Accounts: $service_accounts"
+    echo ""
+
+    if [ "$dry_run" = "true" ]; then
+        print_warning "DRY RUN MODE - No changes will be made"
+        echo ""
+    fi
+
+    # Get namespace list
+    local ns_list=()
+    if [ -z "$namespaces" ] || [ "$namespaces" = "all" ]; then
+        mapfile -t ns_list < <(kubectl get ns -o jsonpath='{.items[*].metadata.name}')
+    else
+        IFS=',' read -ra ns_list <<< "$namespaces"
+        for i in "${!ns_list[@]}"; do
+            ns_list[$i]=$(echo "${ns_list[$i]}" | xargs)
+        done
+    fi
+
+    local success=0
+    local failed=0
+    local skipped=0
+
+    for ns in "${ns_list[@]}"; do
+        echo -ne "${CYAN}Processing namespace: ${ns}...${NC} "
+
+        if ! kubectl get ns "$ns" &>/dev/null; then
+            echo -e "${RED}NOT FOUND${NC}"
+            ((skipped++))
+            continue
+        fi
+
+        if [ "$dry_run" = "true" ]; then
+            echo -e "${YELLOW}[DRY RUN]${NC}"
+            echo "  Would create secret: $secret_name"
+            echo "  Would patch service accounts: $service_accounts"
+            ((success++))
+            continue
+        fi
+
+        # Create/update secret
+        if k8s_create_secret "$ns" "$secret_name" "$harbor_url" "$username" "$token" "$email"; then
+            # Patch service accounts
+            local sa_success=0
+            IFS=',' read -ra sa_list <<< "$service_accounts"
+            for sa in "${sa_list[@]}"; do
+                sa=$(echo "$sa" | xargs)
+                if kubectl get sa "$sa" -n "$ns" &>/dev/null; then
+                    k8s_patch_service_account "$ns" "$sa" "$secret_name"
+                    ((sa_success++))
+                fi
+            done
+
+            echo -e "${GREEN}✓ DONE${NC} (${sa_success} SA(s) patched)"
+            ((success++))
+        else
+            echo -e "${RED}FAILED${NC}"
+            ((failed++))
+        fi
+    done
+
+    echo ""
+    print_header "Summary"
+    echo -e "  ${GREEN}Success:${NC}    $success namespace(s)"
+    echo -e "  ${YELLOW}Skipped:${NC}    $skipped namespace(s)"
+    echo -e "  ${RED}Failed:${NC}     $failed namespace(s)"
+    echo ""
+
+    return $failed
+}
+
+# ======================
+# INTERACTIVE MODES
+# ======================
+
+interactive_create_robot() {
+    print_header "Create Harbor Robot Account"
+
+    # Harbor configuration
+    read -p "$(echo -e ${GREEN}Enter Harbor URL [default: ${DEFAULT_HARBOR_URL}]: ${NC})" harbor_url
+    harbor_url=${harbor_url:-$DEFAULT_HARBOR_URL}
+
+    read -p "$(echo -e ${GREEN}Enter Harbor admin username [default: ${DEFAULT_HARBOR_ADMIN}]: ${NC})" admin_user
+    admin_user=${admin_user:-$DEFAULT_HARBOR_ADMIN}
+
+    read -s -p "$(echo -e ${GREEN}Enter Harbor admin password: ${NC})" admin_pass
+    echo ""
+
+    # Robot configuration
+    read -p "$(echo -e ${GREEN}Enter robot name: ${NC})" robot_name
+    while [ -z "$robot_name" ]; do
+        print_warning "Robot name is required!"
+        read -p "$(echo -e ${GREEN}Enter robot name: ${NC})" robot_name
+    done
+
+    read -p "$(echo -e ${GREEN}Enter robot description [default: CI/CD robot]: ${NC})" robot_desc
+    robot_desc=${robot_desc:-"CI/CD robot"}
+
+    read -p "$(echo -e ${GREEN}Enter expiration days [default: 365, 0 = never]: ${NC})" expires
+    expires=${expires:-365}
+
+    echo ""
+    print_info "Configuration Summary:"
+    echo "  Harbor URL:     $harbor_url"
+    echo "  Admin User:     $admin_user"
+    echo "  Robot Name:     $robot_name"
+    echo "  Description:    $robot_desc"
+    echo "  Expires:        $([ "$expires" -gt 0 ] && echo "$expires days" || echo "Never")"
+    echo ""
+
+    read -p "$(echo -e ${GREEN}Proceed with login? [y/N]: ${NC})" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        print_warning "Cancelled by user"
+        return 1
+    fi
+
+    echo ""
+    # Login first
+    local credentials=$(harbor_login "$harbor_url" "$admin_user" "$admin_pass")
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+
+    # Project selection
+    echo ""
+    echo -ne "${GREEN}Select specific Harbor projects? [y/N] (default: All projects): ${NC} "
+    read select_projects
+    if [[ "$select_projects" =~ ^[Yy]$ ]]; then
+        local selected_projects=$(harbor_select_projects "$harbor_url" "$credentials")
+        if [ $? -ne 0 ]; then
+            print_warning "Failed to select projects, using default (all projects)"
+            selected_projects=""
+        fi
+    else
+        selected_projects=""
+        print_info "Robot will have access to ALL projects"
+    fi
+
+    echo ""
+    print_info "Final Configuration:"
+    echo "  Harbor URL:     $harbor_url"
+    echo "  Robot Name:     $robot_name"
+    echo "  Description:    $robot_desc"
+    echo "  Expires:        $([ "$expires" -gt 0 ] && echo "$expires days" || echo "Never")"
+    if [ -n "$selected_projects" ]; then
+        echo "  Projects:       $selected_projects"
+    else
+        echo "  Projects:       ALL (/*)"
+    fi
+    echo ""
+
+    read -p "$(echo -e ${GREEN}Create robot account now? [y/N]: ${NC})" create_confirm
+    if [[ ! "$create_confirm" =~ ^[Yy]$ ]]; then
+        print_warning "Cancelled by user"
+        return 1
+    fi
+
+    echo ""
+    # Create robot with selected projects
+    local response=$(harbor_create_robot_with_projects "$harbor_url" "$credentials" "$robot_name" "$robot_desc" "$expires" "$selected_projects")
+    local robot_secret=$(echo "$response" | jq -r '.secret')
+
+    if [ -z "$robot_secret" ] || [ "$robot_secret" = "null" ]; then
+        print_error "Failed to create robot account"
+        echo "Response: $response" | jq '.' 2>/dev/null || echo "$response"
+        return 1
+    fi
+
+    echo ""
+    print_header "Robot Account Created Successfully"
+
+    echo -e "${GREEN}Robot Username:${NC} robot\${$robot_name}"
+    echo -e "${GREEN}Robot Secret:${NC}    $robot_secret"
+    if [ -n "$selected_projects" ]; then
+        echo -e "${GREEN}Projects:${NC}       $selected_projects"
+    else
+        echo -e "${GREEN}Projects:${NC}       ALL"
+    fi
+    echo ""
+    print_warning "IMPORTANT: Save this secret now! You won't be able to retrieve it again!"
+    echo ""
+
+    # Save to file with robot name and projects
+    local projects_suffix="all"
+    if [ -n "$selected_projects" ]; then
+        # Replace commas with hyphens for filename
+        projects_suffix=$(echo "$selected_projects" | sed 's/,/-/g')
+    fi
+    local token_file="${robot_name}-${projects_suffix}.token"
+    echo "$robot_secret" > "$token_file"
+    chmod 600 "$token_file"
+    print_info "Token saved to: $token_file"
+
+    # Ask if user wants to apply to Kubernetes
+    echo ""
+    read -p "$(echo -e ${GREEN}Apply to Kubernetes namespaces now? [y/N]: ${NC})" apply_k8s
+    if [[ "$apply_k8s" =~ ^[Yy]$ ]]; then
+        interactive_apply_k8s "$harbor_url" "robot\${$robot_name}" "$robot_secret"
+    fi
+}
+
+interactive_apply_k8s() {
+    local harbor_url="${1:-$DEFAULT_HARBOR_URL}"
+    local robot_user="${2:-}"
+    local robot_token="${3:-}"
+    local email="$DEFAULT_HARBOR_EMAIL"
+    local secret_name="$DEFAULT_SECRET_NAME"
+
+    print_header "Apply Harbor Credentials to Kubernetes"
+
+    # Prompt for Harbor URL if not provided
+    if [ -z "$robot_user" ]; then
+        read -p "$(echo -e ${GREEN}Enter Harbor URL [default: ${DEFAULT_HARBOR_URL}]: ${NC})" harbor_url
+        harbor_url=${harbor_url:-$DEFAULT_HARBOR_URL}
+
+        read -p "$(echo -e ${GREEN}Enter robot username (e.g., robot\$jenkins-robot): ${NC})" robot_user
+
+        read -s -p "$(echo -e ${GREEN}Enter robot token: ${NC})" robot_token
+        echo ""
+    fi
+
+    # List namespaces
+    echo ""
+    print_info "Available Kubernetes Namespaces:"
+    kubectl get ns -o custom-columns="NAME:.metadata.name" | tail -n +2
+    echo ""
+
+    # Select namespaces
+    echo -e "${GREEN}Select namespaces:${NC}"
+    echo "  1. All namespaces"
+    echo "  2. Specific namespaces (comma-separated)"
+    echo "  3. Regex pattern"
+    echo ""
+    read -p "$(echo -e ${GREEN}Enter choice [1-3]: ${NC})" ns_choice
+
+    local namespaces=""
+    case $ns_choice in
+        1)
+            namespaces="all"
+            ;;
+        2)
+            read -p "$(echo -e ${GREEN}Enter namespaces (comma-separated): ${NC})" namespaces
+            ;;
+        3)
+            read -p "$(echo -e ${GREEN}Enter regex pattern: ${NC})" regex
+            namespaces=$(kubectl get ns -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -E "$regex" | tr '\n' ',')
+            namespaces=${namespaces%,}
+            ;;
+    esac
+
+    # Service accounts
+    echo ""
+    read -p "$(echo -e ${GREEN}Service accounts to patch [default: default,jenkins]: ${NC})" service_accounts
+    service_accounts=${service_accounts:-"default,jenkins"}
+
+    echo ""
+    k8s_apply_credentials "$harbor_url" "$robot_user" "$robot_token" "$namespaces" "$service_accounts" "$secret_name" "$email" "false"
+}
+
+interactive_list_robots() {
+    print_header "List Harbor Robot Accounts"
+
+    read -p "$(echo -e ${GREEN}Enter Harbor URL [default: ${DEFAULT_HARBOR_URL}]: ${NC})" harbor_url
+    harbor_url=${harbor_url:-$DEFAULT_HARBOR_URL}
+
+    read -p "$(echo -e ${GREEN}Enter Harbor admin username [default: ${DEFAULT_HARBOR_ADMIN}]: ${NC})" admin_user
+    admin_user=${admin_user:-$DEFAULT_HARBOR_ADMIN}
+
+    read -s -p "$(echo -e ${GREEN}Enter Harbor admin password: ${NC})" admin_pass
+    echo ""
+
+    local credentials=$(harbor_login "$harbor_url" "$admin_user" "$admin_pass")
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+
+    echo ""
+    local robots=$(harbor_list_robots "$harbor_url" "$credentials")
+
+    echo -e "${GREEN}Robot Accounts:${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    echo "$robots" | jq -r '.[] | "
+  • \(.name)
+    ID:          \(.id)
+    Description: \(.description // "N/A")
+    Expires:     \(.expires_at // "Never")
+    Level:       \(.level // "N/A")
+"'
+
+    echo ""
+    print_warning "Secrets are only shown during creation. Use --create-robot to generate a new one."
+}
+
+interactive_list_projects() {
+    print_header "List Harbor Projects"
+
+    read -p "$(echo -e ${GREEN}Enter Harbor URL [default: ${DEFAULT_HARBOR_URL}]: ${NC})" harbor_url
+    harbor_url=${harbor_url:-$DEFAULT_HARBOR_URL}
+
+    read -p "$(echo -e ${GREEN}Enter Harbor admin username [default: ${DEFAULT_HARBOR_ADMIN}]: ${NC})" admin_user
+    admin_user=${admin_user:-$DEFAULT_HARBOR_ADMIN}
+
+    read -s -p "$(echo -e ${GREEN}Enter Harbor admin password: ${NC})" admin_pass
+    echo ""
+
+    local credentials=$(harbor_login "$harbor_url" "$admin_user" "$admin_pass")
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+
+    echo ""
+    local projects=$(harbor_list_projects "$harbor_url" "$credentials")
+    local project_count=$(echo "$projects" | jq '. | length')
+
+    if [ "$project_count" -eq 0 ] || [ "$project_count" = "null" ]; then
+        print_warning "No projects found in Harbor"
+        return 0
+    fi
+
+    print_success "Found $project_count project(s)"
+    echo ""
+    echo -e "${GREEN}Harbor Projects:${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    echo "$projects" | jq -r '.[] | "
+  • \(.name)
+    ID:          \(.project_id)
+    Visibility:  \(.public | if . then "Public" else "Private" end)
+    Repo Count:  \(.repo_count // 0)
+    Created:     \(.creation_time // "N/A")
+"'
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    print_info "Use option 1 (Create Robot) to select specific projects for robot access"
+}
+
+# ======================
+# MAIN MENU
+# ======================
+
+show_main_menu() {
+    echo ""
+    print_header "Main Menu"
+
+    echo -e "${CYAN}Harbor Operations:${NC}"
+    echo "  1. Create Harbor robot account"
+    echo "  2. List existing robot accounts"
+    echo "  3. List Harbor projects"
+    echo ""
+    echo -e "${CYAN}Kubernetes Operations:${NC}"
+    echo "  4. Apply Harbor credentials to Kubernetes"
+    echo ""
+    echo -e "${CYAN}Other:${NC}"
+    echo "  5. Help"
+    echo "  0. Exit"
+    echo ""
+}
+
+main_menu() {
+    while true; do
+        clear
+        banner
+        show_main_menu
+
+        read -p "$(echo -e ${GREEN}Select an option [0-5]: ${NC})" choice
+
+        case $choice in
+            1)
+                clear
+                banner
+                interactive_create_robot
+                read -p "$(echo -e ${GREEN}Press Enter to continue...${NC})"
+                ;;
+            2)
+                clear
+                banner
+                interactive_list_robots
+                read -p "$(echo -e ${GREEN}Press Enter to continue...${NC})"
+                ;;
+            3)
+                clear
+                banner
+                interactive_list_projects
+                read -p "$(echo -e ${GREEN}Press Enter to continue...${NC})"
+                ;;
+            4)
+                clear
+                banner
+                interactive_apply_k8s
+                read -p "$(echo -e ${GREEN}Press Enter to continue...${NC})"
+                ;;
+            5)
+                clear
+                show_help
+                ;;
+            0)
+                echo ""
+                print_success "Goodbye!"
+                exit 0
+                ;;
+            *)
+                print_error "Invalid option"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# ======================
+# COMMAND LINE PARSING
+# ======================
+
+# Default values
+HARBOR_URL="${HARBOR_URL:-$DEFAULT_HARBOR_URL}"
+HARBOR_ADMIN="${HARBOR_ADMIN_USER:-$DEFAULT_HARBOR_ADMIN}"
+HARBOR_ADMIN_PASS="${HARBOR_ADMIN_PASSWORD:-}"
+ROBOT_USER="${HARBOR_ROBOT_USERNAME:-}"
+ROBOT_TOKEN="${HARBOR_ROBOT_TOKEN:-}"
+NAMESPACES="${K8S_NAMESPACES:-}"
+SELECTED_PROJECTS="${HARBOR_PROJECTS:-}"
+SERVICE_ACCOUNTS="default,jenkins"
+SECRET_NAME="$DEFAULT_SECRET_NAME"
+DRY_RUN=false
+AUTO_MODE=false
+
+CREATE_ROBOT=false
+LIST_ROBOTS=false
+LIST_PROJECTS=false
+APPLY_K8S=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            ;;
+        -v|--version)
+            show_version
+            ;;
+        --auto)
+            AUTO_MODE=true
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --create-robot)
+            CREATE_ROBOT=true
+            shift
+            ;;
+        --list-robots)
+            LIST_ROBOTS=true
+            shift
+            ;;
+        --list-projects)
+            LIST_PROJECTS=true
+            shift
+            ;;
+        --apply-k8s)
+            APPLY_K8S=true
+            shift
+            ;;
+        --harbor-url)
+            HARBOR_URL="$2"
+            shift 2
+            ;;
+        --admin-user)
+            HARBOR_ADMIN="$2"
+            shift 2
+            ;;
+        --admin-pass)
+            HARBOR_ADMIN_PASS="$2"
+            shift 2
+            ;;
+        --robot-name)
+            ROBOT_NAME="$2"
+            shift 2
+            ;;
+        --robot-desc)
+            ROBOT_DESC="$2"
+            shift 2
+            ;;
+        --robot-user)
+            ROBOT_USER="$2"
+            shift 2
+            ;;
+        --token)
+            ROBOT_TOKEN="$2"
+            shift 2
+            ;;
+        --expires)
+            EXPIRES_DAYS="$2"
+            shift 2
+            ;;
+        --projects)
+            SELECTED_PROJECTS="$2"
+            shift 2
+            ;;
+        --namespaces)
+            NAMESPACES="$2"
+            shift 2
+            ;;
+        --all-namespaces)
+            NAMESPACES="all"
+            shift
+            ;;
+        --service-accounts)
+            SERVICE_ACCOUNTS="$2"
+            shift 2
+            ;;
+        --secret-name)
+            SECRET_NAME="$2"
+            shift 2
+            ;;
+        *)
+            print_error "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# ======================
+# MAIN EXECUTION
+# ======================
+
+if [ "$AUTO_MODE" = true ]; then
+    banner
+
+    # Handle automated operations
+    if [ "$LIST_ROBOTS" = true ]; then
+        if [ -z "$HARBOR_ADMIN_PASS" ]; then
+            print_error "Harbor admin password required (--admin-pass)"
+            exit 1
+        fi
+        harbor_login "$HARBOR_URL" "$HARBOR_ADMIN" "$HARBOR_ADMIN_PASS" >/dev/null
+        interactive_list_robots
+    elif [ "$LIST_PROJECTS" = true ]; then
+        if [ -z "$HARBOR_ADMIN_PASS" ]; then
+            print_error "Harbor admin password required (--admin-pass)"
+            exit 1
+        fi
+        credentials=$(harbor_login "$HARBOR_URL" "$HARBOR_ADMIN" "$HARBOR_ADMIN_PASS")
+        if [ $? -eq 0 ]; then
+            projects=$(harbor_list_projects "$HARBOR_URL" "$credentials")
+            echo ""
+            echo -e "${GREEN}Harbor Projects:${NC}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "$projects" | jq -r '.[] | "  • \(.name) (\(.public | if . then "Public" else "Private" end))"'
+        fi
+    elif [ "$CREATE_ROBOT" = true ]; then
+        if [ -z "$HARBOR_ADMIN_PASS" ]; then
+            print_error "Harbor admin password required (--admin-pass)"
+            exit 1
+        fi
+        if [ -z "$ROBOT_NAME" ]; then
+            print_error "Robot name required (--robot-name)"
+            exit 1
+        fi
+        ROBOT_DESC="${ROBOT_DESC:-CI/CD robot}"
+        EXPIRES_DAYS="${EXPIRES_DAYS:-365}"
+
+        credentials=$(harbor_login "$HARBOR_URL" "$HARBOR_ADMIN" "$HARBOR_ADMIN_PASS")
+        if [ $? -eq 0 ]; then
+            robot_response=$(harbor_create_robot_with_projects "$HARBOR_URL" "$credentials" "$ROBOT_NAME" "$ROBOT_DESC" "$EXPIRES_DAYS" "$SELECTED_PROJECTS")
+            robot_secret=$(echo "$robot_response" | jq -r '.secret')
+            if [ -n "$robot_secret" ] && [ "$robot_secret" != "null" ]; then
+                print_success "Robot created: robot\$${ROBOT_NAME}"
+                echo "Secret: $robot_secret"
+                if [ -n "$SELECTED_PROJECTS" ]; then
+                    echo "Projects: $SELECTED_PROJECTS"
+                    # Replace commas with hyphens for filename
+                    projects_suffix=$(echo "$SELECTED_PROJECTS" | sed 's/,/-/g')
+                else
+                    echo "Projects: ALL (/*)"
+                    projects_suffix="all"
+                fi
+                token_file="${ROBOT_NAME}-${projects_suffix}.token"
+                echo "$robot_secret" > "$token_file"
+                chmod 600 "$token_file"
+                echo "Token saved to: $token_file"
+            else
+                print_error "Failed to create robot"
+                echo "Response: $robot_response" | jq '.' 2>/dev/null
+                exit 1
+            fi
+        fi
+    elif [ "$APPLY_K8S" = true ]; then
+        if [ -z "$ROBOT_USER" ] || [ -z "$ROBOT_TOKEN" ]; then
+            print_error "Robot user and token required (--robot-user and --token)"
+            exit 1
+        fi
+        k8s_apply_credentials "$HARBOR_URL" "$ROBOT_USER" "$ROBOT_TOKEN" "$NAMESPACES" "$SERVICE_ACCOUNTS" "$SECRET_NAME" "$DEFAULT_HARBOR_EMAIL" "$DRY_RUN"
+    else
+        print_error "No operation specified. Use --create-robot, --list-robots, --list-projects, or --apply-k8s"
+        exit 1
+    fi
+else
+    # Interactive mode
+    main_menu
+fi
